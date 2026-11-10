@@ -243,16 +243,18 @@ class Server(Base):
         try:
             with mock.patch.object(inbox, 'ensure_server', REAL_ENSURE_SERVER):
                 self.assertTrue(inbox.ensure_server(config))
-            log = (Path(os.environ['CLAUDE_INBOX_HOME']) / 'server.log').read_text()
+            log = (Path(os.environ['CLAUDE_INBOX_HOME']) / 'server.log').read_text(encoding='utf-8')
             self.assertIn('收件匣服務已啟動', log)
             self.assertNotIn(config['token'], log)
         finally:  # 必須在測試本體清：tearDown 會先刪掉暫存資料夾與 PID 檔
             if pid_file.exists():
                 try:
                     os.kill(int(pid_file.read_text()), signal.SIGTERM)
-                except (ProcessLookupError, ValueError):
+                except (OSError, ValueError):
                     pass
+                time.sleep(0.5)  # Windows：等行程放掉 server.log，暫存資料夾才刪得掉
 
+    @unittest.skipIf(os.name == 'nt', 'Windows 沒有 POSIX 權限位元；改靠使用者設定檔資料夾的 ACL')
     def test_loopback_default_also_gets_private_token_and_folder(self):
         old = os.umask(0o022)  # 在寬鬆的 umask 下測，權限被放寬時才會變紅
         self.addCleanup(os.umask, old)
@@ -273,7 +275,8 @@ class Server(Base):
         path.write_text(json.dumps({'host': '100.64.0.1'}))
         config = inbox.load_config()
         self.assertTrue(config['token'])
-        self.assertEqual(oct(path.stat().st_mode & 0o777), '0o600')
+        if os.name != 'nt':
+            self.assertEqual(oct(path.stat().st_mode & 0o777), '0o600')
         self.assertIn('?t=' + config['token'], inbox.page_url(config))
 
 

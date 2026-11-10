@@ -1,3 +1,15 @@
 #!/bin/sh
 # 收件匣指令入口：plugin 啟用時 Claude Code 會把 bin/ 放進 PATH。
-exec python3 "$(dirname "$0")/../inbox/inbox.py" "$@"
+# 依序找 python3、python、py -3（Windows Git Bash 常沒有 python3），要 3.9 以上。
+SCRIPT="$(dirname "$0")/../inbox/inbox.py"
+ok='import sys; sys.exit(sys.version_info < (3, 9))'
+for py in python3 python; do
+  if command -v "$py" >/dev/null 2>&1 && "$py" -c "$ok" >/dev/null 2>&1; then
+    exec "$py" "$SCRIPT" "$@"
+  fi
+done
+if command -v py >/dev/null 2>&1 && py -3 -c "$ok" >/dev/null 2>&1; then
+  exec py -3 "$SCRIPT" "$@"
+fi
+echo "inbox: 找不到 Python 3.9 以上" >&2
+exit 1

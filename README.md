@@ -195,3 +195,12 @@ python3 -m unittest discover tests
 ## 授權
 
 MIT
+
+## Windows（原生）支援 — 本 fork 的 `windows-support` 分支
+
+- 檔案鎖：POSIX 用 `fcntl.flock`，Windows 改用 `msvcrt.locking`（鎖第 0 個位元組）。
+- 啟動：hook 改呼叫 `bin/inbox.cmd`（cmd／sh 兩用），依序找 `python`、`py -3`；`bin/inbox` 依序找 `python3`、`python`、`py -3`。
+- 背景服務以 `DETACHED_PROCESS | CREATE_NO_WINDOW` 啟動，不跳黑視窗，hook 結束後繼續活著。
+- Windows 上關閉 `SO_REUSEADDR`，避免兩個服務同時綁同一個埠。
+- 標準輸入輸出一律 UTF-8（Windows 管線預設 cp950）。專案路徑比對不分大小寫。
+- 權限：Windows 沒有 600／700 權限位元，資料夾保護靠 `%USERPROFILE%` 的 ACL；對應測試在 Windows 上略過。

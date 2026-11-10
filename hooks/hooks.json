@@ -2,10 +2,10 @@
   "description": "把使用者在收件匣的新回覆帶進 agent 的上下文",
   "hooks": {
     "SessionStart": [
-      { "hooks": [ { "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/inbox/inbox.py\" hook", "timeout": 10 } ] }
+      { "hooks": [ { "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/inbox.cmd\" hook", "timeout": 10 } ] }
     ],
     "UserPromptSubmit": [
-      { "hooks": [ { "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/inbox/inbox.py\" hook", "timeout": 10 } ] }
+      { "hooks": [ { "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/inbox.cmd\" hook", "timeout": 10 } ] }
     ]
   }
 }

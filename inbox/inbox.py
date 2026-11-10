@@ -4,7 +4,6 @@
 只用 Python 標準庫（3.9 以上）。資料放在 $CLAUDE_INBOX_HOME（預設 ~/.claude-inbox）。
 """
 import argparse
-import fcntl
 import ipaddress
 import json
 import os
@@ -19,12 +18,66 @@ from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+WINDOWS = os.name == 'nt'
+if WINDOWS:
+    import msvcrt
+else:
+    import fcntl
+
 HERE = Path(__file__).resolve().parent
 PAGE = HERE / 'page.html'
 DEFAULT_PORT = 7799
 MAX_BODY = 64 * 1024
 MAX_TEXT = 4000
 ORPHAN_SECONDS = 30 * 60  # 提問的 session 30 分鐘沒來拿，同專案其他 session 可以拿
+
+
+# ---------- 跨平台 ----------
+
+def lock_file(fh):
+    """對整個檔案上互斥鎖（阻塞）。Windows 用 msvcrt 鎖第 0 個位元組，不受檔案長度與指標影響。"""
+    if not WINDOWS:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        return
+    fd = fh.fileno()
+    while True:
+        os.lseek(fd, 0, os.SEEK_SET)
+        try:
+            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+            return
+        except OSError:
+            time.sleep(0.05)
+
+
+def unlock_file(fh):
+    if not WINDOWS:
+        fcntl.flock(fh, fcntl.LOCK_UN)
+        return
+    fd = fh.fileno()
+    os.lseek(fd, 0, os.SEEK_SET)
+    msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+
+
+def replace_file(tmp, path):
+    """os.replace；Windows 上目標剛好被別的行程開著時會 PermissionError，稍等重試。"""
+    for attempt in range(50):
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError:
+            if not WINDOWS or attempt == 49:
+                raise
+            time.sleep(0.05)
+
+
+def same_path(path):
+    """路徑正規化：git 回傳正斜線、Windows 磁碟代號大小寫不一，統一成 realpath（保留大小寫，供顯示）。"""
+    return os.path.realpath(path)
+
+
+def path_key(path):
+    """比對用：Windows 路徑不分大小寫。"""
+    return os.path.normcase(path or '')
 
 
 # ---------- 路徑與設定 ----------
@@ -47,8 +100,8 @@ def load_config():
     path = home() / 'config.json'
     config = read_config(path)
     if not config.get('token'):
-        with open(home() / 'config.lock', 'a') as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
+        with open(home() / 'config.lock', 'a+') as lock:
+            lock_file(lock)
             config = read_config(path)  # 搶到鎖後重讀，別人可能已經產生過
             if not config.get('token'):
                 config['token'] = secrets.token_urlsafe(24)
@@ -69,7 +122,7 @@ def write_json(path, data):
     fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=path.name + '.')  # 預設權限 600
     with os.fdopen(fd, 'w', encoding='utf-8') as fh:
         fh.write(json.dumps(data, ensure_ascii=False, indent=2))
-    os.replace(tmp, path)
+    replace_file(tmp, path)
 
 
 def now_iso():
@@ -81,10 +134,10 @@ def project_of(cwd):
         out = subprocess.run(['git', '-C', str(cwd), 'rev-parse', '--show-toplevel'],
                              capture_output=True, text=True, timeout=5)
         if out.returncode == 0 and out.stdout.strip():
-            return os.path.realpath(out.stdout.strip())
+            return same_path(out.stdout.strip())
     except (OSError, subprocess.SubprocessError):
         pass
-    return os.path.realpath(str(cwd))
+    return same_path(str(cwd))
 
 
 def base_url(config):
@@ -118,11 +171,11 @@ class EventLog:
     def __enter__(self):
         fd = os.open(events_path(), os.O_RDWR | os.O_APPEND | os.O_CREAT, 0o600)
         self.fh = os.fdopen(fd, 'a+', encoding='utf-8')
-        fcntl.flock(self.fh, fcntl.LOCK_EX)
+        lock_file(self.fh)
         return self
 
     def __exit__(self, *exc):
-        fcntl.flock(self.fh, fcntl.LOCK_UN)
+        unlock_file(self.fh)
         self.fh.close()
 
     def read(self):
@@ -179,7 +232,7 @@ def deliverable(session_id, cwd, events=None):
     for q in build_state(events)['questions']:
         asker = q.get('session')
         own = bool(asker) and asker == session_id  # 出題的就是這個 session：不管現在在哪個資料夾
-        if not own and q.get('project') != project:
+        if not own and path_key(q.get('project')) != path_key(project):
             continue
         for a in q['answers']:
             if a['delivered']:
@@ -314,9 +367,14 @@ class Handler(BaseHTTPRequestHandler):
         self.send_text(200, json.dumps({'stored': len(events)}), 'application/json')
 
 
+class Server(ThreadingHTTPServer):
+    # Windows 的 SO_REUSEADDR 允許兩個行程同時綁同一個埠，會讓兩個服務並存；只在 POSIX 開
+    allow_reuse_address = not WINDOWS
+
+
 def serve(config):
     Handler.config = config
-    server = ThreadingHTTPServer((config['host'], config['port']), Handler)
+    server = Server((config['host'], config['port']), Handler)
     (home() / 'server.pid').write_text(str(os.getpid()))  # 綁埠成功才寫：搶輸的不會蓋掉活著的那個
     print('收件匣服務已啟動：' + base_url(config), flush=True)  # 服務的 log 不放 token
     server.serve_forever()
@@ -338,10 +396,16 @@ def server_alive(config):
 def ensure_server(config):
     if server_alive(config):
         return True
-    log = open(home() / 'server.log', 'a')
+    log = open(home() / 'server.log', 'a', encoding='utf-8')
+    if WINDOWS:  # 脫離呼叫者的主控台：hook／指令結束後服務繼續活著，也不跳出黑視窗
+        detach = {'creationflags': subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+                  | subprocess.CREATE_NO_WINDOW, 'close_fds': True}
+    else:
+        detach = {'start_new_session': True}
+    env = dict(os.environ, PYTHONIOENCODING='utf-8')
     subprocess.Popen([sys.executable, str(Path(__file__).resolve()), 'serve'],
-                            stdin=subprocess.DEVNULL, stdout=log, stderr=log,
-                            start_new_session=True)
+                     stdin=subprocess.DEVNULL, stdout=log, stderr=log, env=env, **detach)
+    log.close()
     for _ in range(20):
         time.sleep(0.2)
         if server_alive(config):
@@ -431,12 +495,18 @@ def cmd_stop(args):
     try:
         os.kill(int(pidfile.read_text()), signal.SIGTERM)
         print('已停止')
-    except (ProcessLookupError, ValueError):
+    except (OSError, ValueError):  # Windows 找不到行程時是 OSError，不是 ProcessLookupError
         print('服務本來就沒在跑')
     pidfile.unlink()
 
 
 def main(argv=None):
+    for stream in (sys.stdin, sys.stdout, sys.stderr):  # Windows 管線預設 cp950，hook 的中文與路徑會壞
+        if stream is not None and hasattr(stream, 'reconfigure'):
+            try:
+                stream.reconfigure(encoding='utf-8')
+            except (ValueError, OSError):
+                pass
     parser = argparse.ArgumentParser(prog='inbox', description='Claude Code 收件匣')
     sub = parser.add_subparsers(dest='cmd', required=True)
     p = sub.add_parser('ask', help='放一題進收件匣')
