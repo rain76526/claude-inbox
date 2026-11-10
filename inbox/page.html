@@ -28,6 +28,9 @@
       * {
         box-sizing: border-box;
       }
+      [hidden] {
+        display: none !important;
+      }
       body {
         margin: 0;
         background: var(--bg-0);
@@ -256,6 +259,112 @@
         font-size: 14px;
         margin: 28px 0 10px;
       }
+      .tabs {
+        display: flex;
+        gap: 4px;
+      }
+      .tabs button {
+        padding: 4px 12px;
+        background: transparent;
+        border-color: transparent;
+        color: var(--fg-3);
+      }
+      .tabs button[aria-selected="true"] {
+        background: var(--bg-3);
+        border-color: var(--line-2);
+        color: var(--fg);
+      }
+      .tabs .n {
+        color: var(--amber);
+        margin-left: 4px;
+      }
+      #board {
+        max-width: 1280px;
+        margin: 0 auto;
+        padding: 20px 16px 40px;
+      }
+      .cols {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+        gap: 16px;
+        align-items: start;
+      }
+      .col h2 {
+        margin-top: 0;
+      }
+      .col .n {
+        color: var(--fg-2);
+        margin-left: 4px;
+      }
+      .col details summary {
+        cursor: pointer;
+        color: var(--fg-3);
+        font-size: 14px;
+        font-weight: 600;
+        margin-bottom: 10px;
+      }
+      .line {
+        background: var(--bg-1);
+        border: 1px solid var(--line);
+        border-radius: var(--r);
+        padding: 12px 14px;
+        margin-bottom: 10px;
+        font-size: 14px;
+        overflow-wrap: anywhere;
+      }
+      .line.stale {
+        opacity: 0.6;
+        border-style: dashed;
+      }
+      .line h3 {
+        margin: 4px 0 6px;
+        font-size: 15px;
+        line-height: 1.5;
+      }
+      .line .branch {
+        font-family: var(--mono);
+        font-size: 12px;
+        color: var(--fg-3);
+      }
+      .line .field {
+        color: var(--fg-2);
+        margin-top: 4px;
+      }
+      .line .field b {
+        color: var(--fg-3);
+        font-weight: 400;
+        margin-right: 4px;
+      }
+      .line .blocker {
+        color: var(--red);
+      }
+      .tag.stale {
+        color: var(--red);
+      }
+      button.badge {
+        padding: 1px 8px;
+        border-radius: 99px;
+        font-size: 13px;
+        background: var(--amber);
+        color: var(--ink);
+        border-color: var(--amber);
+        font-weight: 700;
+      }
+      .filter {
+        display: inline-flex;
+        gap: 6px;
+        align-items: center;
+        margin-top: 16px;
+        padding: 3px 4px 3px 12px;
+        border-radius: 99px;
+        background: var(--bg-3);
+        font-size: 13px;
+        color: var(--fg-2);
+      }
+      .filter button {
+        padding: 0 8px;
+        font-size: 13px;
+      }
       @media (max-width: 640px) {
         header {
           flex-wrap: wrap;
@@ -270,10 +379,17 @@
   <body>
     <header>
       <h1>收件匣</h1>
+      <nav class="tabs" role="tablist" aria-label="分頁">
+        <button role="tab" id="tab-inbox" data-tab="inbox" aria-controls="main">收件匣</button>
+        <button role="tab" id="tab-board" data-tab="board" aria-controls="board">
+          看板<span class="n" id="board-count"></span>
+        </button>
+      </nav>
       <span class="count" id="count"></span>
       <span class="updated" id="updated">載入中…</span>
     </header>
-    <main id="main"></main>
+    <main id="main" role="tabpanel" aria-labelledby="tab-inbox"></main>
+    <section id="board" role="tabpanel" aria-labelledby="tab-board" hidden></section>
     <footer>
       <span class="hint" id="ready"></span>
       <button class="primary" id="send-all" disabled>送出全部已答</button>
@@ -290,7 +406,12 @@
         "Content-Type": "application/json",
         "X-Inbox-Token": TOKEN,
       };
-      let STATE = { questions: [] };
+      let STATE = { questions: [], board: [], board_error: "" };
+      let TAB = "inbox";
+      let FILTER = null; // { id: 工作線代號, ids: [題號...] }
+      try {
+        if (localStorage.getItem("inbox-tab") === "board") TAB = "board";
+      } catch (e) {}
       let lastJson = "";
       let dirtyWhileEditing = false;
 
@@ -301,6 +422,7 @@
       const setDraft = (id, d) =>
         localStorage.setItem(draftKey(id), JSON.stringify(d));
 
+      // <pure>  純函式區段：測試會把這段丟給 node 執行
       function esc(s) {
         return String(s).replace(
           /[&<>"']/g,
@@ -355,6 +477,97 @@
       function isOpen(q) {
         return !q.closed && q.answers.length === 0;
       }
+
+      const STATUSES = [
+        ["active", "進行中"],
+        ["blocked", "卡住"],
+        ["review", "待驗收"],
+        ["idle", "閒置"],
+        ["done", "完成"],
+      ];
+
+      function ago(iso) {
+        const t = new Date(iso).getTime();
+        if (isNaN(t)) return "沒有紀錄";
+        const m = Math.max(0, Math.round((Date.now() - t) / 60000));
+        if (m < 1) return "剛剛";
+        if (m < 60) return m + " 分鐘前";
+        if (m < 60 * 48) return Math.round(m / 60) + " 小時前";
+        return Math.round(m / 1440) + " 天前";
+      }
+
+      function boardCardHtml(l) {
+        const field = (label, value, cls) =>
+          value
+            ? '<div class="field' +
+              (cls ? " " + cls : "") +
+              '"><b>' +
+              label +
+              "</b>" +
+              esc(value) +
+              "</div>"
+            : "";
+        const tags = ['<span class="tag">' + esc(l.id) + "</span>"];
+        if (l.session) tags.push("<span>" + esc(l.session) + "</span>");
+        if (l.stale)
+          tags.push(
+            '<span class="tag stale">' + ago(l.last_active) + "沒動靜</span>",
+          );
+        if (l.open_questions > 0)
+          tags.push(
+            '<button class="badge" data-filter="' +
+              esc(l.id) +
+              '" title="看這個專案的未答題">' +
+              Number(l.open_questions) +
+              " 題待回</button>",
+          );
+        return (
+          '<article class="line' +
+          (l.stale ? " stale" : "") +
+          '">' +
+          '<div class="meta">' +
+          tags.join("") +
+          "</div>" +
+          "<h3>" +
+          esc(l.task || l.project || l.id) +
+          "</h3>" +
+          (l.branch ? '<div class="branch">' + esc(l.branch) + "</div>" : "") +
+          field("進度", l.progress) +
+          field("卡點", l.blocker, "blocker") +
+          field("下一步", l.next) +
+          '<div class="field"><b>最後活動</b>' +
+          ago(l.last_active) +
+          "</div>" +
+          "</article>"
+        );
+      }
+
+      function boardHtml(lines) {
+        const known = STATUSES.map(([k]) => k);
+        return (
+          '<div class="cols">' +
+          STATUSES.map(([key, label]) => {
+            const mine = lines.filter((l) =>
+              key === "active"
+                ? l.status === "active" || !known.includes(l.status)
+                : l.status === key,
+            );
+            const head = label + '<span class="n">' + mine.length + "</span>";
+            const cards = mine.length
+              ? mine.map(boardCardHtml).join("")
+              : '<div class="hint">（無）</div>';
+            return (
+              '<div class="col">' +
+              (key === "done"
+                ? "<details><summary>" + head + "</summary>" + cards + "</details>"
+                : "<h2>" + head + "</h2>" + cards) +
+              "</div>"
+            );
+          }).join("") +
+          "</div>"
+        );
+      }
+      // </pure>
 
       function ready(q) {
         const d = getDraft(q.id);
@@ -447,13 +660,23 @@
       }
 
       function render() {
-        const open = STATE.questions.filter(isOpen).reverse();
-        const answered = STATE.questions
+        renderBoard();
+        const shown = FILTER
+          ? STATE.questions.filter((q) => FILTER.ids.includes(q.id))
+          : STATE.questions;
+        const open = shown.filter(isOpen).reverse();
+        const answered = shown
           .filter((q) => !q.closed && q.answers.length)
           .reverse();
-        const closed = STATE.questions.filter((q) => q.closed).reverse();
-        $("count").innerHTML = "待你回 <b>" + open.length + "</b> 題";
+        const closed = shown.filter((q) => q.closed).reverse();
+        $("count").innerHTML =
+          "待你回 <b>" + STATE.questions.filter(isOpen).length + "</b> 題";
         let html =
+          (FILTER
+            ? '<div class="filter">工作線：' +
+              esc(FILTER.id) +
+              '<button data-clear-filter aria-label="移除篩選">×</button></div>'
+            : "") +
           "<h2>待你回答</h2>" +
           (open.length
             ? open.map(cardHtml).join("")
@@ -470,6 +693,32 @@
             "</details>";
         $("main").innerHTML = html;
         updateFooter();
+      }
+
+      function renderBoard() {
+        const lines = STATE.board || [];
+        const active = lines.filter((l) => l.status !== "done").length;
+        $("board-count").textContent = active ? String(active) : "";
+        $("board").innerHTML =
+          (STATE.board_error
+            ? '<div class="err">' + esc(STATE.board_error) + "</div>"
+            : "") +
+          (lines.length
+            ? boardHtml(lines)
+            : '<div class="empty">看板上還沒有工作線。用 <code>inbox status set &lt;代號&gt;</code> 回報。</div>');
+      }
+
+      function showTab(tab) {
+        TAB = tab;
+        try {
+          localStorage.setItem("inbox-tab", tab);
+        } catch (e) {}
+        $("main").hidden = tab !== "inbox";
+        document.querySelector("footer").hidden = tab !== "inbox";
+        $("board").hidden = tab !== "board";
+        $("count").hidden = tab !== "inbox";
+        for (const b of document.querySelectorAll("[data-tab]"))
+          b.setAttribute("aria-selected", String(b.dataset.tab === tab));
       }
 
       function updateFooter() {
@@ -570,6 +819,25 @@
         }, 0);
       });
       document.addEventListener("click", (e) => {
+        const tabBtn = e.target.closest("[data-tab]");
+        if (tabBtn) return showTab(tabBtn.dataset.tab);
+        const badge = e.target.closest("[data-filter]");
+        if (badge) {
+          const line = (STATE.board || []).find(
+            (l) => l.id === badge.dataset.filter,
+          );
+          if (!line) return;
+          FILTER = { id: line.id, ids: line.open_question_ids || [] };
+          showTab("inbox");
+          render();
+          window.scrollTo(0, 0);
+          return;
+        }
+        if (e.target.closest("[data-clear-filter]")) {
+          FILTER = null;
+          render();
+          return;
+        }
         const btn = e.target.closest("[data-send]");
         if (btn) {
           const id = btn.closest(".card").dataset.id;
@@ -589,6 +857,7 @@
         );
       });
 
+      showTab(TAB);
       load();
       setInterval(load, 5000);
     </script>

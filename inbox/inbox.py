@@ -465,14 +465,14 @@ def board_view(questions, stale_minutes=None):
     open_by_project = {}
     for q in questions:
         if not q['closed'] and not q['answers']:
-            key = path_key(q.get('project'))
-            open_by_project[key] = open_by_project.get(key, 0) + 1
+            open_by_project.setdefault(path_key(q.get('project')), []).append(q['id'])
     now = time.time()
     out = []
     for l in lines:
         if not isinstance(l, dict):
             continue
-        out.append(dict(l, open_questions=open_by_project.get(path_key(l.get('project')), 0),
+        ids = open_by_project.get(path_key(l.get('project')), [])
+        out.append(dict(l, open_questions=len(ids), open_question_ids=ids,
                         stale=l.get('status') not in ('done', 'idle') and stale_active(l, now, stale_seconds)))
     return {'board': out, 'board_error': ''}
 

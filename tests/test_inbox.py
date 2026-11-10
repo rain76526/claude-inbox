@@ -2,7 +2,9 @@
 import io
 import json
 import os
+import shutil
 import socket
+import subprocess
 import sys
 import tempfile
 import threading
@@ -369,6 +371,52 @@ class StatusCli(Base):
         self.assertIn('找不到工作線', str(cm.exception.code))
 
 
+NODE = shutil.which('node')
+
+
+@unittest.skipUnless(NODE, '需要 node 才能跑網頁的繪製函式')
+class BoardPage(unittest.TestCase):
+    """把 page.html 裡標成純函式的區段丟給 node 跑，檢查看板卡片的輸出。"""
+
+    def render(self, script):
+        page = inbox.PAGE.read_text(encoding='utf-8')
+        start, end = page.index('// <pure>'), page.index('// </pure>')
+        code = page[start:end] + '\n' + script
+        out = subprocess.run([NODE, '-e', code], capture_output=True, text=True, encoding='utf-8', timeout=20)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        return out.stdout
+
+    def line(self, **kw):
+        base = {'id': 'a', 'session': 's', 'project': 'p', 'path': 'p', 'branch': 'b', 'task': 't',
+                'status': 'active', 'progress': '', 'blocker': '', 'next': '', 'updated_at': '',
+                'last_active': new_iso(), 'open_questions': 0, 'open_question_ids': [], 'stale': False}
+        base.update(kw)
+        return json.dumps(base)
+
+    def test_board_card_escapes_every_text_field(self):
+        evil = '<img src=x onerror=alert(1)>'
+        fields = {k: evil for k in ('id', 'session', 'branch', 'task', 'progress', 'blocker', 'next', 'project')}
+        html = self.render('process.stdout.write(boardCardHtml(%s))' % self.line(**fields))
+        self.assertNotIn('<img', html)
+        self.assertIn('&lt;img', html)
+
+    def test_board_columns_badge_and_stale_mark(self):
+        lines = '[%s,%s,%s]' % (self.line(id='x1', status='blocked', open_questions=2, open_question_ids=['q1', 'q2']),
+                                self.line(id='x2', stale=True), self.line(id='x3', status='done'))
+        html = self.render('process.stdout.write(boardHtml(%s))' % lines)
+        for label in ('進行中', '卡住', '待驗收', '閒置', '完成'):
+            self.assertIn(label, html)
+        self.assertIn('data-filter="x1"', html)  # 有未答題才有可點的徽章
+        self.assertNotIn('data-filter="x2"', html)
+        self.assertIn('stale', html)
+        self.assertLess(html.index('卡住'), html.index('x1'))
+        self.assertIn('<details', html[html.index('完成') - 200:])  # 完成欄預設收合
+
+
+def new_iso():
+    return datetime.now().astimezone().isoformat(timespec='seconds')
+
+
 class Server(Base):
     def start(self, host='127.0.0.1', token=''):
         port = free_port()
@@ -465,6 +513,7 @@ class Server(Base):
         port = self.start()
         board = {l['id']: l for l in json.loads(self.req(port, '/api/state')[1])['board']}
         self.assertEqual(board['here']['open_questions'], 1)  # 收起的、已答的不算
+        self.assertEqual(len(board['here']['open_question_ids']), 1)  # 網頁點徽章時用來篩選
         self.assertEqual(board['old']['open_questions'], 0)
         self.assertEqual((board['here']['stale'], board['old']['stale'], board['old-done']['stale']),
                          (False, True, False))
