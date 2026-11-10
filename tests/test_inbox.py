@@ -445,6 +445,43 @@ class Server(Base):
         self.assertIn('config.json', out.getvalue())
         self.assertFalse((Path(os.environ['CLAUDE_INBOX_HOME']) / 'server.pid').exists())
 
+    def test_state_includes_board_with_open_questions_and_stale_flag(self):
+        q1 = self.ask('--title', '未答', '--option', 'A=甲')
+        self.ask('--title', '也未答', '--option', 'A=甲')
+        q3 = self.ask('--title', '已答', '--option', 'A=甲')
+        self.answer(q3)
+        with redirect_stdout(io.StringIO()):
+            inbox.main(['close', q1])
+        inbox.set_line('here', {'task': 't'})
+        inbox.set_line('old', {'task': 't', 'project': str(Path(self.tmp.name) / 'other')})
+        inbox.set_line('old-done', {'status': 'done'})
+        old = (datetime.now().astimezone() - timedelta(minutes=121)).isoformat(timespec='seconds')
+
+        def change(lines):
+            for l in lines:
+                if l['id'] in ('old', 'old-done'):
+                    l['last_active'] = old
+        inbox.update_board(change)
+        port = self.start()
+        board = {l['id']: l for l in json.loads(self.req(port, '/api/state')[1])['board']}
+        self.assertEqual(board['here']['open_questions'], 1)  # 收起的、已答的不算
+        self.assertEqual(board['old']['open_questions'], 0)
+        self.assertEqual((board['here']['stale'], board['old']['stale'], board['old-done']['stale']),
+                         (False, True, False))
+
+    def test_stale_minutes_configurable_and_corrupt_board_reported(self):
+        inbox.set_line('a', {})
+        old = (datetime.now().astimezone() - timedelta(minutes=10)).isoformat(timespec='seconds')
+        inbox.update_board(lambda lines: lines[0].update(last_active=old))
+        port = self.start()
+        inbox.Handler.config['board_stale_minutes'] = 5
+        state = json.loads(self.req(port, '/api/state')[1])
+        self.assertTrue(state['board'][0]['stale'])
+        inbox.board_path().write_text('{bad', encoding='utf-8')
+        state = json.loads(self.req(port, '/api/state')[1])
+        self.assertEqual(state['board'], [])
+        self.assertIn('看板資料讀不到', state['board_error'])
+
     def test_token_required_when_configured(self):
         port = self.start(token='secret-token')
         self.assertEqual(self.req(port, '/api/state')[0], 401)

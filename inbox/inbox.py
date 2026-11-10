@@ -340,6 +340,7 @@ TEXT_FIELDS = ('session', 'project', 'path', 'branch', 'task', 'progress', 'bloc
 MAX_FIELD = 500
 MAX_LINES = 200
 ACTIVE_THROTTLE_SECONDS = 60
+STALE_MINUTES = 120
 BOARD_HOOK_LOCK_SECONDS = 2
 LINE_ID = re.compile(r'^[A-Za-z0-9_.-]{1,64}$')
 
@@ -451,6 +452,31 @@ def touch_active(session_id):
         pass
 
 
+def board_view(questions, stale_minutes=None):
+    """給網頁的看板：每條線加上 open_questions（同專案、未收起、未回答）與 stale。"""
+    try:
+        lines = read_board()['lines']
+    except BoardError as exc:
+        return {'board': [], 'board_error': str(exc)}
+    try:
+        stale_seconds = float(stale_minutes) * 60 if stale_minutes else STALE_MINUTES * 60
+    except (TypeError, ValueError):
+        stale_seconds = STALE_MINUTES * 60
+    open_by_project = {}
+    for q in questions:
+        if not q['closed'] and not q['answers']:
+            key = path_key(q.get('project'))
+            open_by_project[key] = open_by_project.get(key, 0) + 1
+    now = time.time()
+    out = []
+    for l in lines:
+        if not isinstance(l, dict):
+            continue
+        out.append(dict(l, open_questions=open_by_project.get(path_key(l.get('project')), 0),
+                        stale=l.get('status') not in ('done', 'idle') and stale_active(l, now, stale_seconds)))
+    return {'board': out, 'board_error': ''}
+
+
 def remove_line(line_id):
     def change(lines):
         keep = [l for l in lines if l.get('id') != line_id]
@@ -506,7 +532,9 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_text(200, PAGE.read_text(encoding='utf-8'), 'text/html; charset=utf-8')
         elif path == '/api/state':
             if self.check(api=True):
-                self.send_text(200, json.dumps(build_state(), ensure_ascii=False),
+                state = build_state()
+                state.update(board_view(state['questions'], self.config.get('board_stale_minutes')))
+                self.send_text(200, json.dumps(state, ensure_ascii=False),
                                'application/json; charset=utf-8')
         else:
             self.send_text(404, 'not found')
