@@ -151,6 +151,37 @@ class Delivery(Base):
             inbox.main(['hook'])
         self.assertEqual(out.getvalue(), '')  # 沒有新回覆時什麼都不印
 
+    def test_hook_ignores_utf8_bom_on_stdin(self):
+        # Windows PowerShell 5.1 透過管線送 stdin 會先加 UTF-8 BOM（來自 PR #1）
+        qid = self.ask('--title', 'BOM 題', '--option', 'A=甲')
+        self.answer(qid)
+        stdin = io.StringIO('﻿' + json.dumps({'session_id': 'sess-1', 'cwd': str(self.project)}))
+        with mock.patch.object(sys, 'stdin', stdin), redirect_stdout(io.StringIO()) as out:
+            inbox.main(['hook'])
+        self.assertIn('BOM 題', out.getvalue())
+
+    def test_locks_use_separate_lock_files_not_data_files(self):
+        # 鎖獨立的 .lock 檔：Windows 的 msvcrt 鎖會擋住別人讀資料檔的第一個位元組（來自 PR #1）
+        locked = []
+        real_lock = inbox.lock_file
+
+        def spy(fh):
+            name = fh.name if isinstance(fh.name, str) else 'events.jsonl'  # os.fdopen 的 name 是 fd
+            locked.append(os.path.basename(name))
+            real_lock(fh)
+
+        with mock.patch.object(inbox, 'lock_file', spy):
+            inbox.load_config()
+            qid = self.ask('--title', 't', '--option', 'A=甲')
+            with inbox.EventLog() as log:
+                log.append([{'event_id': 'e1', 'kind': 'answered', 'question_id': qid,
+                             'choice': 'A', 'text': '', 'at': inbox.now_iso()}])
+                # 持鎖期間，別的讀者仍能直接讀 events.jsonl
+                self.assertIn('e1', inbox.events_path().read_text(encoding='utf-8'))
+        self.assertIn('config.lock', locked)
+        self.assertIn('events.lock', locked)
+        self.assertNotIn('events.jsonl', locked)
+
     def test_close_hides_question_from_list(self):
         qid = self.ask('--title', '要收的題')
         with redirect_stdout(io.StringIO()):
@@ -198,6 +229,44 @@ class Server(Base):
                                   headers={'Origin': 'http://evil.example'})[0], 403)
         self.assertEqual(self.req(port, '/api/answer', {'answers': [{'question_id': qid, 'choice': 'Z'}]})[0], 400)
         self.assertEqual(inbox.read_events(), [])
+
+    def raw_post(self, port, path, body, headers):
+        """用原始 socket 送 POST，回傳狀態碼；連線被 RST 時會丟 ConnectionError。"""
+        head = ['POST %s HTTP/1.1' % path, 'Host: 127.0.0.1:%d' % port, 'Connection: close']
+        head += ['%s: %s' % kv for kv in headers.items()]
+        with socket.create_connection(('127.0.0.1', port), timeout=5) as s:
+            s.sendall(('\r\n'.join(head) + '\r\n\r\n').encode())
+            time.sleep(0.1)  # 本文晚到：服務若沒等本文就回應關線，Windows 會送 RST，用戶端收不到回應
+            s.sendall(body)
+            time.sleep(0.1)
+            data = b''
+            while True:
+                chunk = s.recv(65536)
+                if not chunk:
+                    break
+                data += chunk
+        self.assertTrue(data, '服務沒回任何東西就關線')
+        return int(data.split(b' ', 2)[1])
+
+    def test_post_errors_reply_cleanly_after_reading_body(self):
+        # 錯誤回應前先讀完本文：Windows 關閉有未讀資料的連線會送 RST，用戶端收不到狀態碼（來自 PR #1）
+        port = self.start()
+        body = json.dumps({'answers': [{'question_id': 'x', 'text': 'y' * 60000}]}).encode()
+        base = {'Content-Type': 'application/json', 'Content-Length': str(len(body))}
+        self.assertEqual(self.raw_post(port, '/api/nope', body, base), 404)
+        self.assertEqual(self.raw_post(port, '/api/answer', body, dict(base, Origin='http://evil.example')), 403)
+        self.assertEqual(self.raw_post(port, '/api/answer', body, dict(base, **{'Content-Type': 'text/plain'})), 415)
+        self.assertEqual(self.raw_post(port, '/api/answer', b'', dict(base, **{'Content-Length': 'abc'})), 413)
+
+    def test_bind_permission_error_explains_reserved_port_on_windows(self):
+        boom = PermissionError(13, 'WinError 10013')
+        with mock.patch.object(inbox, 'WINDOWS', True), \
+                mock.patch.object(inbox, 'Server', side_effect=boom), \
+                redirect_stdout(io.StringIO()) as out, self.assertRaises(PermissionError):
+            inbox.serve({'host': '127.0.0.1', 'port': 7799, 'token': ''})
+        self.assertIn('excludedportrange', out.getvalue())
+        self.assertIn('config.json', out.getvalue())
+        self.assertFalse((Path(os.environ['CLAUDE_INBOX_HOME']) / 'server.pid').exists())
 
     def test_token_required_when_configured(self):
         port = self.start(token='secret-token')

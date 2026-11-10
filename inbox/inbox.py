@@ -58,6 +58,29 @@ def unlock_file(fh):
     msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
 
 
+class FileLock:
+    """鎖獨立的 .lock 檔，不鎖資料檔本身：Windows 的 msvcrt 鎖會擋住別人讀資料檔的第 0 個位元組。
+    （來自 PR #1，Dave Tseng）"""
+
+    def __init__(self, path):
+        self.path = path
+
+    def __enter__(self):
+        self.fh = open(self.path, 'a+b')
+        try:
+            lock_file(self.fh)
+        except BaseException:
+            self.fh.close()
+            raise
+        return self
+
+    def __exit__(self, *exc):
+        try:
+            unlock_file(self.fh)
+        finally:
+            self.fh.close()
+
+
 def replace_file(tmp, path):
     """os.replace；Windows 上目標剛好被別的行程開著時會 PermissionError，稍等重試。"""
     for attempt in range(50):
@@ -100,8 +123,7 @@ def load_config():
     path = home() / 'config.json'
     config = read_config(path)
     if not config.get('token'):
-        with open(home() / 'config.lock', 'a+') as lock:
-            lock_file(lock)
+        with FileLock(home() / 'config.lock'):
             config = read_config(path)  # 搶到鎖後重讀，別人可能已經產生過
             if not config.get('token'):
                 config['token'] = secrets.token_urlsafe(24)
@@ -166,17 +188,23 @@ def events_path():
 
 
 class EventLog:
-    """events.jsonl 的讀寫，全部包在同一把檔案鎖裡。"""
+    """events.jsonl 的讀寫，全部包在 events.lock 這把檔案鎖裡。"""
 
     def __enter__(self):
-        fd = os.open(events_path(), os.O_RDWR | os.O_APPEND | os.O_CREAT, 0o600)
-        self.fh = os.fdopen(fd, 'a+', encoding='utf-8')
-        lock_file(self.fh)
+        self.lock = FileLock(home() / 'events.lock').__enter__()
+        try:
+            fd = os.open(events_path(), os.O_RDWR | os.O_APPEND | os.O_CREAT, 0o600)
+            self.fh = os.fdopen(fd, 'a+', encoding='utf-8')
+        except BaseException:
+            self.lock.__exit__(None, None, None)
+            raise
         return self
 
     def __exit__(self, *exc):
-        unlock_file(self.fh)
-        self.fh.close()
+        try:
+            self.fh.close()
+        finally:
+            self.lock.__exit__(*exc)
 
     def read(self):
         self.fh.seek(0)
@@ -347,17 +375,23 @@ class Handler(BaseHTTPRequestHandler):
             self.send_text(404, 'not found')
 
     def do_POST(self):
+        try:
+            length = int(self.headers.get('Content-Length') or 0)
+        except ValueError:
+            length = -1
+        # 先讀完本文再回錯誤：Windows 關閉還有未讀資料的連線會送 RST，
+        # 用戶端收不到 403/404，只看到 WinError 10053/10054。（來自 PR #1，Dave Tseng）
+        raw = self.rfile.read(length) if 0 < length <= MAX_BODY else None
         if self.path != '/api/answer':
             return self.send_text(404, 'not found')
         if not self.check(api=True):
             return
         if not self.headers.get('Content-Type', '').startswith('application/json'):
             return self.send_text(415, '只收 JSON')
-        length = int(self.headers.get('Content-Length') or 0)
-        if length <= 0 or length > MAX_BODY:
+        if raw is None:
             return self.send_text(413, '內容太大或是空的')
         try:
-            payload = json.loads(self.rfile.read(length).decode('utf-8'))
+            payload = json.loads(raw.decode('utf-8'))
             questions = {q['id']: q for q in load_questions()}
             events = validate_answers(payload, questions)
         except ValueError as exc:
@@ -374,7 +408,14 @@ class Server(ThreadingHTTPServer):
 
 def serve(config):
     Handler.config = config
-    server = Server((config['host'], config['port']), Handler)
+    try:
+        server = Server((config['host'], config['port']), Handler)
+    except PermissionError:
+        if WINDOWS:  # WinError 10013：埠落在 Hyper-V／WinNAT 保留範圍，沒人在用也綁不到（來自 PR #1，Dave Tseng）
+            print('綁不到埠 %s：可能在 Windows 保留範圍內（netsh interface ipv4 show '
+                  'excludedportrange protocol=tcp）。請在 %s 設定其他 port。'
+                  % (config['port'], home() / 'config.json'), flush=True)
+        raise
     (home() / 'server.pid').write_text(str(os.getpid()))  # 綁埠成功才寫：搶輸的不會蓋掉活著的那個
     print('收件匣服務已啟動：' + base_url(config), flush=True)  # 服務的 log 不放 token
     server.serve_forever()
@@ -472,7 +513,8 @@ def cmd_wait(args):
 def cmd_hook(args):
     """給 Claude Code hook 用：stdin 是 hook 的 JSON，stdout 會進 agent 的上下文。"""
     try:
-        data = json.loads(sys.stdin.read() or '{}')
+        # Windows PowerShell 5.1 透過管線送 stdin 會先加 UTF-8 BOM（來自 PR #1，Dave Tseng）
+        data = json.loads(sys.stdin.read().lstrip('﻿') or '{}')
     except ValueError:
         data = {}
     pairs = take(data.get('session_id', ''), data.get('cwd') or os.getcwd())
