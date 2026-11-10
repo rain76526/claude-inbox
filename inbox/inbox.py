@@ -7,6 +7,7 @@ import argparse
 import ipaddress
 import json
 import os
+import re
 import secrets
 import signal
 import subprocess
@@ -322,6 +323,103 @@ def validate_answers(payload, questions):
                        'choice': choice, 'choice_label': labels.get(choice, ''),
                        'text': text.strip(), 'at': now_iso()})
     return events
+
+
+# ---------- 進度看板 ----------
+
+STATUSES = {'active': '進行中', 'blocked': '卡住', 'review': '待驗收', 'done': '完成', 'idle': '閒置'}
+TEXT_FIELDS = ('session', 'project', 'path', 'branch', 'task', 'progress', 'blocker', 'next')
+MAX_FIELD = 500
+MAX_LINES = 200
+LINE_ID = re.compile(r'^[A-Za-z0-9_.-]{1,64}$')
+
+
+class BoardError(ValueError):
+    pass
+
+
+def board_path():
+    return home() / 'board.json'
+
+
+def read_board():
+    """讀 board.json；沒有檔案回空看板，壞掉就丟 BoardError（呼叫端不能拿空看板去覆蓋它）。"""
+    path = board_path()
+    if not path.exists():
+        return {'version': 1, 'lines': []}
+    try:
+        data = json.loads(path.read_text(encoding='utf-8'))
+    except (OSError, ValueError) as exc:
+        raise BoardError('看板資料讀不到（%s）：%s' % (path, exc))
+    if not isinstance(data, dict) or not isinstance(data.get('lines'), list):
+        raise BoardError('看板資料格式不對：%s' % path)
+    return data
+
+
+def parse_status(value):
+    if value in STATUSES:
+        return value
+    for key, label in STATUSES.items():
+        if value == label:
+            return key
+    raise BoardError('狀態只能是：' + '／'.join('%s(%s)' % kv for kv in STATUSES.items()))
+
+
+def git_branch(cwd):
+    try:
+        out = subprocess.run(['git', '-C', str(cwd), 'rev-parse', '--abbrev-ref', 'HEAD'],
+                             capture_output=True, text=True, timeout=5)
+        if out.returncode == 0:
+            return out.stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return ''
+
+
+def update_board(change):
+    """鎖 board.lock → 重讀 → change(lines) → 原子寫回。"""
+    with FileLock(home() / 'board.lock'):
+        board = read_board()
+        change(board['lines'])
+        write_json(board_path(), board)
+    return board
+
+
+def set_line(line_id, fields):
+    if not isinstance(line_id, str) or not LINE_ID.match(line_id):
+        raise BoardError('工作線代號只能用英數、-、_、.，1 到 64 字：%r' % line_id)
+    fields = dict(fields)
+    if 'status' in fields:
+        fields['status'] = parse_status(fields['status'])
+    for key in TEXT_FIELDS:
+        if key in fields and len(fields[key] or '') > MAX_FIELD:
+            raise BoardError('%s 太長（上限 %d 字）' % (key, MAX_FIELD))
+    stamp = now_iso()
+
+    def change(lines):
+        line = next((l for l in lines if l.get('id') == line_id), None)
+        if line is None:
+            if len(lines) >= MAX_LINES:
+                raise BoardError('看板最多 %d 條工作線，先 remove 用不到的' % MAX_LINES)
+            cwd = os.getcwd()
+            line = {'id': line_id, 'session': '', 'session_id': os.environ.get('CLAUDE_CODE_SESSION_ID', ''),
+                    'project': project_of(cwd), 'path': same_path(cwd), 'branch': git_branch(cwd),
+                    'task': '', 'status': 'active', 'progress': '', 'blocker': '', 'next': ''}
+            lines.append(line)
+        line.update({k: v for k, v in fields.items() if k in TEXT_FIELDS + ('status',)})
+        line['updated_at'] = line['last_active'] = stamp
+
+    update_board(change)
+
+
+def remove_line(line_id):
+    def change(lines):
+        keep = [l for l in lines if l.get('id') != line_id]
+        if len(keep) == len(lines):
+            raise BoardError('找不到工作線：' + line_id)
+        lines[:] = keep
+
+    update_board(change)
 
 
 # ---------- 網頁服務 ----------

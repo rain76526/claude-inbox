@@ -192,6 +192,82 @@ class Delivery(Base):
         self.assertTrue(inbox.build_state()['questions'][0]['closed'])
 
 
+class Board(Base):
+    def test_set_creates_then_merges_only_given_fields(self):
+        inbox.set_line('inbox-board', {'task': '看板', 'status': '進行中', 'progress': '寫規格'})
+        line = inbox.read_board()['lines'][0]
+        self.assertEqual((line['id'], line['status'], line['task']), ('inbox-board', 'active', '看板'))
+        self.assertEqual(line['session_id'], 'sess-1')  # 自動帶入
+        self.assertEqual(line['project'], os.path.realpath(str(self.project)))
+        self.assertTrue(line['updated_at'] and line['last_active'])
+        inbox.set_line('inbox-board', {'progress': '實作中', 'status': 'blocked', 'blocker': '等回覆'})
+        line = inbox.read_board()['lines'][0]
+        self.assertEqual((line['task'], line['progress'], line['status'], line['blocker']),
+                         ('看板', '實作中', 'blocked', '等回覆'))
+        inbox.set_line('inbox-board', {'blocker': ''})
+        self.assertEqual(inbox.read_board()['lines'][0]['blocker'], '')
+        self.assertEqual(len(inbox.read_board()['lines']), 1)
+
+    def test_set_does_not_overwrite_auto_fields_of_existing_line(self):
+        inbox.set_line('a', {'task': 't'})
+        other = Path(self.tmp.name) / 'other'
+        other.mkdir()
+        os.chdir(other)
+        with mock.patch.dict(os.environ, {'CLAUDE_CODE_SESSION_ID': 'sess-2'}):
+            inbox.set_line('a', {'progress': 'p'})
+        line = inbox.read_board()['lines'][0]
+        self.assertEqual(line['project'], os.path.realpath(str(self.project)))
+        self.assertEqual(line['session_id'], 'sess-1')
+
+    def test_remove_line(self):
+        inbox.set_line('a', {'task': 't'})
+        inbox.set_line('b', {'task': 't'})
+        inbox.remove_line('a')
+        self.assertEqual([l['id'] for l in inbox.read_board()['lines']], ['b'])
+        with self.assertRaises(inbox.BoardError):
+            inbox.remove_line('a')
+
+    def test_validation_rejects_bad_id_status_long_text_and_too_many_lines(self):
+        for bad_id in ('', 'a b', 'x' * 65, '../x'):
+            with self.assertRaises(inbox.BoardError):
+                inbox.set_line(bad_id, {'task': 't'})
+        with self.assertRaises(inbox.BoardError):
+            inbox.set_line('a', {'status': '亂寫'})
+        with self.assertRaises(inbox.BoardError):
+            inbox.set_line('a', {'progress': 'x' * 501})
+        with mock.patch.object(inbox, 'MAX_LINES', 2):
+            inbox.set_line('a', {})
+            inbox.set_line('b', {})
+            with self.assertRaises(inbox.BoardError):
+                inbox.set_line('c', {})
+            inbox.set_line('a', {'task': '改既有的還是可以'})
+
+    def test_corrupt_board_is_never_overwritten(self):
+        inbox.home()
+        path = Path(os.environ['CLAUDE_INBOX_HOME']) / 'board.json'
+        path.write_text('{not json', encoding='utf-8')
+        with self.assertRaises(inbox.BoardError):
+            inbox.set_line('a', {'task': 't'})
+        with self.assertRaises(inbox.BoardError):
+            inbox.remove_line('a')
+        self.assertEqual(path.read_text(encoding='utf-8'), '{not json')
+        with self.assertRaises(inbox.BoardError):
+            inbox.read_board()
+
+    def test_missing_board_reads_empty_and_uses_board_lock(self):
+        self.assertEqual(inbox.read_board(), {'version': 1, 'lines': []})
+        locked = []
+        real_lock = inbox.lock_file
+
+        def spy(fh):
+            locked.append(os.path.basename(fh.name))
+            real_lock(fh)
+
+        with mock.patch.object(inbox, 'lock_file', spy):
+            inbox.set_line('a', {})
+        self.assertEqual(locked, ['board.lock'])
+
+
 class Server(Base):
     def start(self, host='127.0.0.1', token=''):
         port = free_port()
