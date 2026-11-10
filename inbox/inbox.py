@@ -35,18 +35,25 @@ ORPHAN_SECONDS = 30 * 60  # 提問的 session 30 分鐘沒來拿，同專案其�
 
 # ---------- 跨平台 ----------
 
-def lock_file(fh):
-    """對整個檔案上互斥鎖（阻塞）。Windows 用 msvcrt 鎖第 0 個位元組，不受檔案長度與指標影響。"""
-    if not WINDOWS:
+def lock_file(fh, timeout=None):
+    """對整個檔案上互斥鎖。Windows 用 msvcrt 鎖第 0 個位元組，不受檔案長度與指標影響。
+    timeout 是秒數，None 表示一直等；等不到丟 TimeoutError。"""
+    if not WINDOWS and timeout is None:
         fcntl.flock(fh, fcntl.LOCK_EX)
         return
     fd = fh.fileno()
+    deadline = None if timeout is None else time.monotonic() + timeout
     while True:
-        os.lseek(fd, 0, os.SEEK_SET)
         try:
-            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+            if WINDOWS:
+                os.lseek(fd, 0, os.SEEK_SET)
+                msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+            else:
+                fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
             return
         except OSError:
+            if deadline is not None and time.monotonic() >= deadline:
+                raise TimeoutError('等不到檔案鎖')
             time.sleep(0.05)
 
 
@@ -63,13 +70,14 @@ class FileLock:
     """鎖獨立的 .lock 檔，不鎖資料檔本身：Windows 的 msvcrt 鎖會擋住別人讀資料檔的第 0 個位元組。
     （來自 PR #1，Dave Tseng）"""
 
-    def __init__(self, path):
+    def __init__(self, path, timeout=None):
         self.path = path
+        self.timeout = timeout
 
     def __enter__(self):
         self.fh = open(self.path, 'a+b')
         try:
-            lock_file(self.fh)
+            lock_file(self.fh, self.timeout)
         except BaseException:
             self.fh.close()
             raise
@@ -331,6 +339,8 @@ STATUSES = {'active': '進行中', 'blocked': '卡住', 'review': '待驗收', '
 TEXT_FIELDS = ('session', 'project', 'path', 'branch', 'task', 'progress', 'blocker', 'next')
 MAX_FIELD = 500
 MAX_LINES = 200
+ACTIVE_THROTTLE_SECONDS = 60
+BOARD_HOOK_LOCK_SECONDS = 2
 LINE_ID = re.compile(r'^[A-Za-z0-9_.-]{1,64}$')
 
 
@@ -376,9 +386,9 @@ def git_branch(cwd):
     return ''
 
 
-def update_board(change):
+def update_board(change, timeout=None):
     """鎖 board.lock → 重讀 → change(lines) → 原子寫回。"""
-    with FileLock(home() / 'board.lock'):
+    with FileLock(home() / 'board.lock', timeout):
         board = read_board()
         change(board['lines'])
         write_json(board_path(), board)
@@ -410,6 +420,35 @@ def set_line(line_id, fields):
         line['updated_at'] = line['last_active'] = stamp
 
     update_board(change)
+
+
+def stale_active(line, now, seconds):
+    try:
+        return now - datetime.fromisoformat(line.get('last_active') or '').timestamp() >= seconds
+    except ValueError:
+        return True
+
+
+def touch_active(session_id):
+    """hook 用：更新已登記 session 的 last_active。不能拖慢 hook，任何問題都直接放棄。"""
+    if not session_id or not board_path().exists():
+        return
+    now = time.time()
+    try:
+        lines = read_board()['lines']
+        if not any(l.get('session_id') == session_id and stale_active(l, now, ACTIVE_THROTTLE_SECONDS)
+                   for l in lines):
+            return  # 沒登記，或 60 秒內剛更新過：不拿鎖、不寫檔
+        stamp = now_iso()
+
+        def change(lines):
+            for l in lines:
+                if l.get('session_id') == session_id:
+                    l['last_active'] = stamp
+
+        update_board(change, timeout=BOARD_HOOK_LOCK_SECONDS)
+    except (BoardError, OSError, TimeoutError):
+        pass
 
 
 def remove_line(line_id):
@@ -617,7 +656,8 @@ def cmd_hook(args):
         data = {}
     pairs = take(data.get('session_id', ''), data.get('cwd') or os.getcwd())
     if pairs:
-        print(format_answers(pairs))
+        print(format_answers(pairs), flush=True)
+    touch_active(data.get('session_id', ''))
 
 
 def cmd_list(args):

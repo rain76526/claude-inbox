@@ -165,10 +165,10 @@ class Delivery(Base):
         locked = []
         real_lock = inbox.lock_file
 
-        def spy(fh):
+        def spy(fh, *rest):
             name = fh.name if isinstance(fh.name, str) else 'events.jsonl'  # os.fdopen 的 name 是 fd
             locked.append(os.path.basename(name))
-            real_lock(fh)
+            real_lock(fh, *rest)
 
         with mock.patch.object(inbox, 'lock_file', spy):
             inbox.load_config()
@@ -259,13 +259,75 @@ class Board(Base):
         locked = []
         real_lock = inbox.lock_file
 
-        def spy(fh):
+        def spy(fh, *rest):
             locked.append(os.path.basename(fh.name))
-            real_lock(fh)
+            real_lock(fh, *rest)
 
         with mock.patch.object(inbox, 'lock_file', spy):
             inbox.set_line('a', {})
         self.assertEqual(locked, ['board.lock'])
+
+
+class HookActivity(Base):
+    def hook(self, session='sess-1'):
+        stdin = io.StringIO(json.dumps({'session_id': session, 'cwd': str(self.project)}))
+        with mock.patch.object(sys, 'stdin', stdin), redirect_stdout(io.StringIO()) as out:
+            inbox.main(['hook'])
+        return out.getvalue()
+
+    def age_line(self, line_id, seconds):
+        old = (datetime.now().astimezone() - timedelta(seconds=seconds)).isoformat(timespec='seconds')
+
+        def change(lines):
+            for l in lines:
+                if l['id'] == line_id:
+                    l['last_active'] = old
+        inbox.update_board(change)
+        return old
+
+    def line(self, line_id):
+        return next(l for l in inbox.read_board()['lines'] if l['id'] == line_id)
+
+    def test_hook_updates_last_active_of_registered_session(self):
+        inbox.set_line('a', {'task': 't'})
+        old = self.age_line('a', 3600)
+        updated_at = self.line('a')['updated_at']
+        self.hook()
+        self.assertNotEqual(self.line('a')['last_active'], old)
+        self.assertEqual(self.line('a')['updated_at'], updated_at)  # 自動訊號不動人為回報的時間
+
+    def test_hook_throttles_recent_and_ignores_unregistered(self):
+        inbox.set_line('a', {'task': 't'})
+        self.age_line('a', 10)  # 60 秒內不重寫
+        with mock.patch.object(inbox, 'write_json') as wj:
+            self.hook()
+            self.hook(session='sess-unknown')
+        wj.assert_not_called()
+
+    def test_hook_without_board_creates_nothing(self):
+        self.hook()
+        self.assertFalse(inbox.board_path().exists())
+        self.assertFalse((Path(os.environ['CLAUDE_INBOX_HOME']) / 'board.lock').exists())
+
+    def test_hook_gives_up_on_busy_lock_and_still_delivers_answers(self):
+        qid = self.ask('--title', '照樣送到', '--option', 'A=甲')
+        self.answer(qid)
+        inbox.set_line('a', {'task': 't'})
+        old = self.age_line('a', 3600)
+        with mock.patch.object(inbox, 'BOARD_HOOK_LOCK_SECONDS', 0.3), \
+                inbox.FileLock(inbox.home() / 'board.lock'):
+            start = time.time()
+            out = self.hook()
+            self.assertLess(time.time() - start, 3)
+        self.assertIn('照樣送到', out)
+        self.assertEqual(self.line('a')['last_active'], old)
+
+    def test_hook_survives_corrupt_board(self):
+        qid = self.ask('--title', '壞檔也送到', '--option', 'A=甲')
+        self.answer(qid)
+        inbox.board_path().write_text('{bad', encoding='utf-8')
+        self.assertIn('壞檔也送到', self.hook())
+        self.assertEqual(inbox.board_path().read_text(encoding='utf-8'), '{bad')
 
 
 class StatusCli(Base):
