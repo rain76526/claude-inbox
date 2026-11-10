@@ -268,6 +268,45 @@ class Board(Base):
         self.assertEqual(locked, ['board.lock'])
 
 
+class StatusCli(Base):
+    def status(self, *argv):
+        with redirect_stdout(io.StringIO()) as out:
+            inbox.main(['status'] + list(argv))
+        return out.getvalue()
+
+    def test_set_list_remove(self):
+        self.status('set', 'inbox-board', '--status', '卡住', '--task', '看板', '--progress', '寫規格',
+                 '--blocker', '等確認', '--next', '實作', '--session', 'pm-inbox', '--branch', 'feature/board')
+        line = inbox.read_board()['lines'][0]
+        self.assertEqual((line['status'], line['session'], line['branch'], line['next']),
+                         ('blocked', 'pm-inbox', 'feature/board', '實作'))
+        out = self.status('list')
+        self.assertIn('inbox-board', out)
+        self.assertIn('卡住', out)
+        self.assertIn('等確認', out)
+        data = json.loads(self.status('list', '--json'))
+        self.assertEqual(data['lines'][0]['id'], 'inbox-board')
+        self.status('remove', 'inbox-board')
+        self.assertEqual(inbox.read_board()['lines'], [])
+
+    def test_list_hides_done_unless_all(self):
+        self.status('set', 'a', '--status', 'done', '--task', '做完的')
+        self.status('set', 'b', '--task', '還在做')
+        self.assertNotIn('做完的', self.status('list'))
+        self.assertIn('還在做', self.status('list'))
+        self.assertIn('做完的', self.status('list', '--all'))
+        self.assertEqual(len(json.loads(self.status('list', '--json'))['lines']), 1)
+        self.assertEqual(len(json.loads(self.status('list', '--json', '--all'))['lines']), 2)
+
+    def test_errors_exit_nonzero_with_message(self):
+        with self.assertRaises(SystemExit) as cm:
+            self.status('set', 'a', '--status', '亂寫')
+        self.assertIn('狀態只能是', str(cm.exception.code))
+        with self.assertRaises(SystemExit) as cm:
+            self.status('remove', 'nope')
+        self.assertIn('找不到工作線', str(cm.exception.code))
+
+
 class Server(Base):
     def start(self, host='127.0.0.1', token=''):
         port = free_port()

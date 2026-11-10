@@ -628,6 +628,32 @@ def cmd_list(args):
         print('%s  %s  %s  （%s）' % (q['id'], status, q['title'], q['from']))
 
 
+def cmd_status(args):
+    try:
+        if args.action == 'set':
+            fields = {k: getattr(args, k) for k in TEXT_FIELDS + ('status',) if getattr(args, k) is not None}
+            set_line(args.id, fields)
+            print('已更新工作線：' + args.id)
+        elif args.action == 'remove':
+            remove_line(args.id)
+            print('已移除工作線：' + args.id)
+        else:
+            board = read_board()
+            lines = [l for l in board['lines'] if args.all or l.get('status') != 'done']
+            if args.json:
+                return print(json.dumps(dict(board, lines=lines), ensure_ascii=False, indent=2))
+            if not lines:
+                return print('看板上沒有工作線。')
+            order = list(STATUSES)
+            for l in sorted(lines, key=lambda l: order.index(l['status']) if l.get('status') in order else 99):
+                print('%s｜%s｜%s｜%s｜%s｜%s｜%s｜%s' % (
+                    l.get('id'), l.get('session') or '-', l.get('branch') or '-', l.get('task') or '-',
+                    STATUSES.get(l.get('status'), l.get('status')), l.get('progress') or '-',
+                    l.get('blocker') or '-', l.get('next') or '-'))
+    except BoardError as exc:
+        sys.exit(str(exc))
+
+
 def cmd_stop(args):
     pidfile = home() / 'server.pid'
     if not pidfile.exists():
@@ -664,6 +690,21 @@ def main(argv=None):
     p = sub.add_parser('wait', help='等到有新回覆才結束')
     p.add_argument('--timeout', type=int, default=1800)
     p.set_defaults(func=cmd_wait)
+    p = sub.add_parser('status', help='進度看板：回報／查看工作線狀態')
+    actions = p.add_subparsers(dest='action', required=True)
+    s = actions.add_parser('set', help='新增或更新一條工作線（只改有給的欄位）')
+    s.add_argument('id')
+    s.add_argument('--status', help='進行中／卡住／待驗收／完成／閒置（或 active/blocked/review/done/idle）')
+    for name, text in (('session', 'session 名稱'), ('project', '專案根'), ('path', '工作路徑'),
+                       ('branch', '分支'), ('task', '需求'), ('progress', '進度一句話'),
+                       ('blocker', '卡點，給空字串可清掉'), ('next', '下一步')):
+        s.add_argument('--' + name, help=text)
+    s = actions.add_parser('list', help='列出工作線')
+    s.add_argument('--json', action='store_true')
+    s.add_argument('--all', action='store_true', help='連完成的也列')
+    s = actions.add_parser('remove', help='移除一條工作線')
+    s.add_argument('id')
+    p.set_defaults(func=cmd_status)
     p = sub.add_parser('close', help='把處理完的題目收起來')
     p.add_argument('ids', nargs='+')
     p.set_defaults(func=cmd_close)
