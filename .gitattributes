@@ -1,0 +1,4 @@
+# sh 腳本與 cmd/sh 兩用入口必須是 LF，否則 #!/bin/sh\r 會壞
+bin/* text eol=lf
+*.py text eol=lf
+*.json text eol=lf
