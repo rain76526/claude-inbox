@@ -50,6 +50,23 @@ inbox ask --title "登入頁要不要保留舊的帳密登入？" \
 - 答案照使用者選的做。他的補充說明比選項文字優先。
 - 處理完一題後跑 `inbox close <題號>`，把它從使用者的畫面收起來。
 
+## 回報進度（進度看板）
+
+你是好幾條工作線之一、或使用者要你回報進度時，用 `inbox status` 更新看板，使用者在收件匣網頁的「看板」分頁看得到：
+
+```bash
+inbox status set login-revamp --status 進行中 --task "登入頁改版" \
+  --progress "Google 登入接好了" --next "補測試"
+inbox status set login-revamp --status 卡住 --blocker "等使用者決定要不要保留帳密登入"
+inbox status set login-revamp --blocker ""     # 卡點解了就清掉
+inbox status list                              # 看全部；--json 給程式讀
+inbox status remove login-revamp
+```
+
+- 狀態：進行中、卡住、待驗收、完成、閒置。
+- 只改有給的欄位。第一次 `set` 會自動記下專案、路徑、分支和這個對話。
+- 狀態有變、卡住、或卡點解了就更新一次；不用每一步都更新。最後活動時間會自動記。
+
 ## 答案會送到哪個對話
 
 答案只送回出題的那個對話。那個對話 30 分鐘內沒來拿的話，同一個專案裡的其他對話也拿得到，所以出題的對話結束了也不會掉。每則答案只會送出一次。

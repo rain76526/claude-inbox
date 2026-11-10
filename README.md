@@ -114,6 +114,20 @@ inbox ask --title "要不要上新版？" --option "A=上" --option "B=不上" -
 
 這是給還沒有自己流程的人用的預設做法。你已經有自己的總PM、狀態檔或審查流程時，agent 會沿用你的，只補收件匣那一塊，不會另建一套。
 
+### 進度看板
+
+收件匣網頁多了一個「看板」分頁：每條工作線一張卡片，依狀態（進行中／卡住／待驗收／閒置／完成）分欄，顯示分支、進度、卡點、下一步，以及這條線的專案還有幾題等你回（點一下就跳到那些題）。太久沒動靜的線會標出來。
+
+工作線自己回報：
+
+```bash
+inbox status set login-revamp --status 卡住 --task "登入頁改版" --blocker "等你決定要不要保留帳密登入"
+inbox status list            # --json 給總PM 讀，--all 連完成的也列
+inbox status remove login-revamp
+```
+
+最後活動時間由 hook 自動記，不用回報。預設 120 分鐘沒動靜就標示，可在 `config.json` 用 `"board_stale_minutes"` 改。
+
 ## 不用 Claude Code 也能用（Codex 等其他 agent）
 
 收件匣的核心是一支 Python 指令加一個網頁，不綁 Claude Code。plugin 只是 Claude Code 專用的打包。其他 agent 能在 shell 裡直接跑同一支指令：
@@ -165,7 +179,9 @@ python3 /path/to/claude-inbox/inbox/inbox.py ask --title "..." --option "A=..." 
 |---|---|
 | `questions/*.json` | 題目，一題一檔 |
 | `events.jsonl` | 你的回答、送達紀錄、收起紀錄，只增不改 |
-| `config.json` | 位址、埠、token |
+| `config.json` | 位址、埠、token、看板的 `board_stale_minutes` |
+| `board.json` | 進度看板，一條工作線一筆 |
+| `*.lock` | 檔案鎖，內容是空的 |
 
 題目與答案都是明文，不要放密碼或金鑰。
 
@@ -177,7 +193,7 @@ python3 /path/to/claude-inbox/inbox/inbox.py ask --title "..." --option "A=..." 
 
 - 只收 `Host` 與 `Origin` 符合的請求，擋掉別的網頁偷打你的本機服務。
 - 所有 API 都要 token，本機也一樣：答案會被放進 agent 的上下文，不能讓同一台機器上的其他程式隨便寫入。
-- 頁面把題目文字當純文字顯示，只有網址會變成連結。
+- 頁面把題目文字當純文字顯示，只有網址會變成連結。看板的文字全部當純文字顯示，網頁對看板只讀。
 - 回答只在你的機器上流動，沒有任何外送。
 
 ### 需求
