@@ -713,6 +713,8 @@ def cmd_status(args):
             if not lines:
                 return print('看板上沒有工作線。')
             order = list(STATUSES)
+            # 同狀態內最新消息在上（updated_at 由新到舊；ISO 字串可直接比較）
+            lines = sorted(lines, key=lambda l: l.get('updated_at') or l.get('last_active') or '', reverse=True)
             for l in sorted(lines, key=lambda l: order.index(l['status']) if l.get('status') in order else 99):
                 print('%s｜%s｜%s｜%s｜%s｜%s｜%s｜%s' % (
                     l.get('id'), l.get('session') or '-', l.get('branch') or '-', l.get('task') or '-',

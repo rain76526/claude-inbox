@@ -542,8 +542,15 @@
         );
       }
 
+      // 最新消息在上：依 updated_at（沒有就用 last_active）由新到舊
+      function lineTime(l) {
+        const t = new Date(l.updated_at || l.last_active || 0).getTime();
+        return isNaN(t) ? 0 : t;
+      }
+
       function boardHtml(lines) {
         const known = STATUSES.map(([k]) => k);
+        lines = lines.slice().sort((a, b) => lineTime(b) - lineTime(a));
         return (
           '<div class="cols">' +
           STATUSES.map(([key, label]) => {
