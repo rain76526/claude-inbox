@@ -7,6 +7,8 @@
 Claude Code 專用的「決定信箱」：agent 要你拍板的事，統一放進一個網頁。<br>
 你有空時一次看完、一次回答，**答案自動回到 agent 手上**。
 
+<sub>本 repo fork 自 [chenjackle45/claude-inbox](https://github.com/chenjackle45/claude-inbox)，另外加上原生 Windows 支援與進度看板。</sub>
+
 ![license MIT](https://img.shields.io/badge/license-MIT-green) ![Python 3.9+](https://img.shields.io/badge/Python-3.9%2B-blue) ![Claude Code plugin](https://img.shields.io/badge/Claude_Code-plugin-d97757)
 
 <img src="docs/demo.gif" alt="示範：在收件匣網頁選答案、寫補充、送出，agent 立刻收到" width="760">
@@ -64,7 +66,7 @@ Claude Code 專用的「決定信箱」：agent 要你拍板的事，統一放�
 在 Claude Code 裡輸入：
 
 ```
-/plugin marketplace add chenjackle45/claude-inbox
+/plugin marketplace add rain76526/claude-inbox
 /plugin install inbox@claude-inbox
 ```
 
@@ -133,7 +135,7 @@ inbox status remove login-revamp
 收件匣的核心是一支 Python 指令加一個網頁，不綁 Claude Code。plugin 只是 Claude Code 專用的打包。其他 agent 能在 shell 裡直接跑同一支指令：
 
 ```bash
-git clone https://github.com/chenjackle45/claude-inbox
+git clone https://github.com/rain76526/claude-inbox
 python3 claude-inbox/inbox/inbox.py ask --title "要不要上新版？" --option "A=上" --option "B=不上"
 python3 claude-inbox/inbox/inbox.py wait --timeout 1800   # 有回覆時印出答案並結束
 ```
