@@ -70,6 +70,8 @@ Claude Code 專用的「決定信箱」：agent 要你拍板的事，統一放�
 /plugin install inbox@claude-inbox
 ```
 
+Windows 安裝遇到問題（marketplace 來源不符、找不到 Python、網頁打不開），見 [docs/INSTALL-windows.md](docs/INSTALL-windows.md)。
+
 裝好後重開一次 Claude Code，然後對 agent 說：
 
 > 有要我決定的事，就放進收件匣。
